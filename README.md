@@ -1,6 +1,6 @@
-# Telegram English-to-Hindi Translator Bot
+# Telegram English-to-Hindi Translator Bot (Admin-Only)
 
-Free English -> Hindi Telegram bot using `python-telegram-bot` and `deep-translator`.
+Free English -> Hindi Telegram bot using `python-telegram-bot` and `deep-translator` (with MyMemory fallback).
 
 ## Setup & Run
 
@@ -9,7 +9,10 @@ Free English -> Hindi Telegram bot using `python-telegram-bot` and `deep-transla
    ```bash
    cp .env.example .env
    ```
-3. Activate the virtual environment and start the bot:
+3. Add your numeric Telegram User ID(s) to `ADMIN_USER_IDS` in `.env` (comma-separated).
+   - You can message `/myid` to the bot to see your numeric User ID.
+   - In groups/supergroups, Telegram group admins (`OWNER` / `ADMINISTRATOR`) are also allowed automatically.
+4. Start the bot:
    ```bash
    .venv/bin/python bot.py
    ```
