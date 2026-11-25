@@ -1,11 +1,14 @@
+import json
 import logging
 import os
 from pathlib import Path
 
 from deep_translator import GoogleTranslator, MyMemoryTranslator
-from telegram import ChatMember, Update
+from telegram import ChatMember, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -18,6 +21,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+BASE_DIR = Path(__file__).parent
+SETTINGS_PATH = BASE_DIR / "group_settings.json"
+
 
 def _read_env_value(key_name: str) -> str:
     """Read a config value from environment variables or local .env file."""
@@ -25,7 +31,7 @@ def _read_env_value(key_name: str) -> str:
     if val:
         return val
 
-    env_path = Path(__file__).parent / ".env"
+    env_path = BASE_DIR / ".env"
     if env_path.exists():
         for line in env_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -60,7 +66,56 @@ def load_admin_ids() -> set[int]:
 ADMIN_IDS: set[int] = load_admin_ids()
 
 
-async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+def _load_settings() -> dict[str, str]:
+    if not SETTINGS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_settings(settings: dict[str, str]) -> None:
+    SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
+def get_group_mode(chat_id: int) -> str:
+    """Return 'admins' (default) or 'all' for a group chat."""
+    mode = _load_settings().get(str(chat_id), "admins")
+    return mode if mode in ("admins", "all") else "admins"
+
+
+def set_group_mode(chat_id: int, mode: str) -> None:
+    settings = _load_settings()
+    settings[str(chat_id)] = mode
+    _save_settings(settings)
+
+
+def mode_keyboard(current_mode: str) -> InlineKeyboardMarkup:
+    admins_label = "✓ Admins Only" if current_mode == "admins" else "Admins Only"
+    all_label = "✓ Every User" if current_mode == "all" else "Every User"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(admins_label, callback_data="mode:admins"),
+                InlineKeyboardButton(all_label, callback_data="mode:all"),
+            ]
+        ]
+    )
+
+
+async def bot_is_group_admin(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Check whether the bot itself currently holds admin rights in the group."""
+    try:
+        bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
+        return bot_member.status in (ChatMember.ADMINISTRATOR, ChatMember.OWNER)
+    except Exception as exc:
+        logger.warning("Failed to check bot admin status in %s: %s", chat_id, exc)
+        return False
+
+
+async def is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Allow group/supergroup admins (including anonymous admins) and configured ADMIN_USER_IDS."""
     chat = update.effective_chat
     user = update.effective_user
@@ -68,7 +123,6 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not chat:
         return False
 
-    # Anonymous group admin posting as the group itself
     if chat.type in ("group", "supergroup") and msg and msg.sender_chat:
         if msg.sender_chat.id == chat.id:
             return True
@@ -109,8 +163,66 @@ def translate_en_to_hi(text: str) -> str:
     return "\n".join(_translate_chunk(part) for part in parts)
 
 
+async def handle_my_chat_member(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Require group admin access when the bot is added to or updated in a group."""
+    chat_member = update.my_chat_member
+    if not chat_member:
+        return
+
+    chat = chat_member.chat
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    old_status = chat_member.old_chat_member.status
+    new_status = chat_member.new_chat_member.status
+
+    # Bot was just added as a regular member (without admin rights)
+    if old_status in (ChatMember.LEFT, ChatMember.BANNED) and new_status == ChatMember.MEMBER:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=(
+                "Admin access required: Please promote me to Group Admin so I can "
+                "translate English messages to Hindi in this group."
+            ),
+        )
+    # Bot was promoted to Administrator
+    elif old_status != ChatMember.ADMINISTRATOR and new_status == ChatMember.ADMINISTRATOR:
+        mode = get_group_mode(chat.id)
+        mode_text = "Every User" if mode == "all" else "Admins Only"
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=(
+                f"Admin access granted! English-to-Hindi translation is now active.\n"
+                f"Current mode: {mode_text}\n"
+                "Group admins can change who gets translated using /mode."
+            ),
+            reply_markup=mode_keyboard(mode),
+        )
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await is_admin(update, context):
+    chat = update.effective_chat
+    if not chat:
+        return
+
+    if chat.type in ("group", "supergroup"):
+        if not await bot_is_group_admin(chat.id, context):
+            await update.message.reply_text(
+                "Admin access required: Please promote me to Group Admin to enable translations."
+            )
+            return
+        if await is_user_admin(update, context):
+            mode = get_group_mode(chat.id)
+            mode_text = "Every User" if mode == "all" else "Admins Only"
+            await update.message.reply_text(
+                f"Namaste! Translation is active in this group (Mode: {mode_text}).\n"
+                "Use /mode to switch between Admins Only and Every User."
+            )
+        return
+
+    if await is_user_admin(update, context):
         await update.message.reply_text(
             "Namaste Admin! Send any English text and I will translate it to Hindi."
         )
@@ -122,13 +234,85 @@ async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"Your Telegram User ID: {user.id}")
 
 
+async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Allow group admins to choose between 'admins' only or 'all' users."""
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("The /mode setting is only for group chats.")
+        return
+
+    if not await is_user_admin(update, context):
+        return
+
+    if not await bot_is_group_admin(chat.id, context):
+        await update.message.reply_text(
+            "Please promote me to Group Admin first before configuring /mode."
+        )
+        return
+
+    args = context.args or []
+    if args:
+        arg = args[0].strip().lower()
+        if arg in ("all", "everyone", "every"):
+            set_group_mode(chat.id, "all")
+            await update.message.reply_text(
+                "Translation mode updated: Every User in this group.",
+                reply_markup=mode_keyboard("all"),
+            )
+            return
+        if arg in ("admin", "admins"):
+            set_group_mode(chat.id, "admins")
+            await update.message.reply_text(
+                "Translation mode updated: Group Admins Only.",
+                reply_markup=mode_keyboard("admins"),
+            )
+            return
+
+    current = get_group_mode(chat.id)
+    label = "Every User" if current == "all" else "Admins Only"
+    await update.message.reply_text(
+        f"Current group translation mode: {label}\nChoose who can use the translator:",
+        reply_markup=mode_keyboard(current),
+    )
+
+
+async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.data:
+        return
+
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await query.answer()
+        return
+
+    if not await is_user_admin(update, context):
+        await query.answer("Only group admins can change this setting.", show_alert=True)
+        return
+
+    if not await bot_is_group_admin(chat.id, context):
+        await query.answer("Please promote the bot to Group Admin first.", show_alert=True)
+        return
+
+    new_mode = "all" if query.data == "mode:all" else "admins"
+    set_group_mode(chat.id, new_mode)
+    label = "Every User" if new_mode == "all" else "Admins Only"
+    await query.answer(f"Mode set to: {label}")
+    await query.edit_message_text(
+        f"Group translation mode: {label}",
+        reply_markup=mode_keyboard(new_mode),
+    )
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await is_admin(update, context):
+    if not await is_user_admin(update, context):
         return
     await update.message.reply_text(
-        "Send any English message, sentence, or paragraph — I'll reply with the Hindi translation.\n"
-        "In groups, only group admins' English messages are translated.\n"
-        "Commands: /start, /help, /myid"
+        "Send any English text to translate it to Hindi.\n"
+        "In groups:\n"
+        "- The bot must be promoted to Group Admin.\n"
+        "- Use /mode to toggle between Admins Only and Every User.\n"
+        "Commands: /start, /mode, /help, /myid"
     )
 
 
@@ -136,8 +320,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.message or not update.message.text:
         return
 
-    if not await is_admin(update, context):
+    chat = update.effective_chat
+    if not chat:
         return
+
+    if chat.type in ("group", "supergroup"):
+        # Bot must have admin access in the group to operate
+        if not await bot_is_group_admin(chat.id, context):
+            return
+
+        mode = get_group_mode(chat.id)
+        if mode == "admins" and not await is_user_admin(update, context):
+            return
+    else:
+        if not await is_user_admin(update, context):
+            return
 
     text = update.message.text.strip()
     if not text:
@@ -155,13 +352,18 @@ def main() -> None:
     token = load_token()
     logger.info("Loaded %d configured admin user ID(s)", len(ADMIN_IDS))
     app = ApplicationBuilder().token(token).build()
+    app.add_handler(
+        ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
+    )
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("myid", myid_command))
+    app.add_handler(CommandHandler("mode", mode_command))
+    app.add_handler(CallbackQueryHandler(mode_callback, pattern="^mode:(admins|all)$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("English-to-Hindi bot is running (admin-only polling)...")
-    app.run_polling()
+    logger.info("English-to-Hindi bot is running (polling)...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
