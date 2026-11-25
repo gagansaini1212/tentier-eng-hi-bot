@@ -204,7 +204,7 @@ async def handle_my_chat_member(
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
-    if not chat:
+    if not chat or not update.message:
         return
 
     if chat.type in ("group", "supergroup"):
@@ -222,10 +222,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
         return
 
-    if await is_user_admin(update, context):
-        await update.message.reply_text(
-            "Namaste Admin! Send any English text and I will translate it to Hindi."
-        )
+    bot_username = context.bot.username or "TentierEngToHi_bot"
+    add_group_url = f"https://t.me/{bot_username}?startgroup=true&admin=manage_chat"
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Add to Group as Admin", url=add_group_url)]]
+    )
+    await update.message.reply_text(
+        "Namaste! I translate English messages to Hindi.\n\n"
+        "How to use in a group:\n"
+        "1. Tap 'Add to Group as Admin' below and grant Admin access.\n"
+        "2. Group admins can run /mode to choose:\n"
+        "   • Admins Only (default)\n"
+        "   • Every User",
+        reply_markup=keyboard,
+    )
 
 
 async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
