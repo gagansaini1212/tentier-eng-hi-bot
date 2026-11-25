@@ -61,16 +61,22 @@ ADMIN_IDS: set[int] = load_admin_ids()
 
 
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Allow configured ADMIN_USER_IDS everywhere, plus group/supergroup chat admins."""
-    user = update.effective_user
+    """Allow group/supergroup admins (including anonymous admins) and configured ADMIN_USER_IDS."""
     chat = update.effective_chat
-    if not user or not chat:
+    user = update.effective_user
+    msg = update.effective_message
+    if not chat:
         return False
 
-    if user.id in ADMIN_IDS:
+    # Anonymous group admin posting as the group itself
+    if chat.type in ("group", "supergroup") and msg and msg.sender_chat:
+        if msg.sender_chat.id == chat.id:
+            return True
+
+    if user and user.id in ADMIN_IDS:
         return True
 
-    if chat.type in ("group", "supergroup"):
+    if chat.type in ("group", "supergroup") and user:
         try:
             member = await context.bot.get_chat_member(chat.id, user.id)
             return member.status in (ChatMember.ADMINISTRATOR, ChatMember.OWNER)
@@ -104,13 +110,12 @@ def translate_en_to_hi(text: str) -> str:
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
     if await is_admin(update, context):
         await update.message.reply_text(
-            "Namaste Admin! Send me any English text and I will translate it to Hindi."
+            "Namaste Admin! Send any English text and I will translate it to Hindi."
         )
-    else:
-        uid = user.id if user else "unknown"
+    elif update.effective_chat and update.effective_chat.type == "private":
+        uid = update.effective_user.id if update.effective_user else "unknown"
         await update.message.reply_text(
             f"Access denied. This bot is restricted to admins only.\nYour Telegram User ID: {uid}"
         )
@@ -124,13 +129,15 @@ async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_admin(update, context):
-        uid = update.effective_user.id if update.effective_user else "unknown"
-        await update.message.reply_text(
-            f"Access denied. Admins only.\nYour Telegram User ID: {uid}"
-        )
+        if update.effective_chat and update.effective_chat.type == "private":
+            uid = update.effective_user.id if update.effective_user else "unknown"
+            await update.message.reply_text(
+                f"Access denied. Admins only.\nYour Telegram User ID: {uid}"
+            )
         return
     await update.message.reply_text(
         "Send any English message, sentence, or paragraph — I'll reply with the Hindi translation.\n"
+        "In groups, only group admins' English messages are translated.\n"
         "Commands: /start, /help, /myid"
     )
 
@@ -140,10 +147,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if not await is_admin(update, context):
-        uid = update.effective_user.id if update.effective_user else "unknown"
-        await update.message.reply_text(
-            f"Access denied. Only admins can use this bot.\nYour Telegram User ID: {uid}"
-        )
+        # In groups, silently ignore non-admin messages so we don't spam the chat
+        if update.effective_chat and update.effective_chat.type == "private":
+            uid = update.effective_user.id if update.effective_user else "unknown"
+            await update.message.reply_text(
+                f"Access denied. Only admins can use this bot.\nYour Telegram User ID: {uid}"
+            )
         return
 
     text = update.message.text.strip()
