@@ -5,6 +5,7 @@ from pathlib import Path
 
 from deep_translator import GoogleTranslator, MyMemoryTranslator
 from telegram import ChatMember, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -244,6 +245,18 @@ async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"Your Telegram User ID: {user.id}")
 
 
+def mode_status_text(mode: str) -> str:
+    if mode == "all":
+        return (
+            "Bot is set for Every User.\n"
+            "All group members' English messages will be translated to Hindi."
+        )
+    return (
+        "Bot is set for Admins Only.\n"
+        "Only group admins' English messages will be translated to Hindi."
+    )
+
+
 async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Allow group admins to choose between 'admins' only or 'all' users."""
     chat = update.effective_chat
@@ -266,22 +279,21 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if arg in ("all", "everyone", "every"):
             set_group_mode(chat.id, "all")
             await update.message.reply_text(
-                "Translation mode updated: Every User in this group.",
+                mode_status_text("all"),
                 reply_markup=mode_keyboard("all"),
             )
             return
         if arg in ("admin", "admins"):
             set_group_mode(chat.id, "admins")
             await update.message.reply_text(
-                "Translation mode updated: Group Admins Only.",
+                mode_status_text("admins"),
                 reply_markup=mode_keyboard("admins"),
             )
             return
 
     current = get_group_mode(chat.id)
-    label = "Every User" if current == "all" else "Admins Only"
     await update.message.reply_text(
-        f"Current group translation mode: {label}\nChoose who can use the translator:",
+        f"{mode_status_text(current)}\n\nChoose who can use the translator:",
         reply_markup=mode_keyboard(current),
     )
 
@@ -307,11 +319,15 @@ async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     new_mode = "all" if query.data == "mode:all" else "admins"
     set_group_mode(chat.id, new_mode)
     label = "Every User" if new_mode == "all" else "Admins Only"
-    await query.answer(f"Mode set to: {label}")
-    await query.edit_message_text(
-        f"Group translation mode: {label}",
-        reply_markup=mode_keyboard(new_mode),
-    )
+    await query.answer(f"Bot is set for {label}")
+    try:
+        await query.edit_message_text(
+            mode_status_text(new_mode),
+            reply_markup=mode_keyboard(new_mode),
+        )
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
