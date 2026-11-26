@@ -1,0 +1,15 @@
+app = "gagansaini-en-hi-bot"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  SETTINGS_PATH = "/data/group_settings.json"
+
+[[mounts]]
+  source = "en_hi_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"

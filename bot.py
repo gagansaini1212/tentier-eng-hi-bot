@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
-SETTINGS_PATH = BASE_DIR / "group_settings.json"
+SETTINGS_PATH = Path(os.environ.get("SETTINGS_PATH", str(BASE_DIR / "group_settings.json")))
 
 
 def _read_env_value(key_name: str) -> str:
@@ -78,6 +78,7 @@ def _load_settings() -> dict[str, str]:
 
 
 def _save_settings(settings: dict[str, str]) -> None:
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
 

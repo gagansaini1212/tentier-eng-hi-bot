@@ -1,0 +1,6 @@
+.venv/
+.env
+group_settings.json
+__pycache__/
+*.pyc
+.git/
