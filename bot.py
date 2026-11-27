@@ -4,9 +4,11 @@ import os
 from pathlib import Path
 
 from deep_translator import GoogleTranslator, MyMemoryTranslator
+import httpx
 from telegram import ChatMember, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CallbackQueryHandler,
     ChatMemberHandler,
@@ -67,7 +69,39 @@ def load_admin_ids() -> set[int]:
 ADMIN_IDS: set[int] = load_admin_ids()
 
 
+def _upstash_config() -> tuple[str, str] | None:
+    url = _read_env_value("UPSTASH_REDIS_REST_URL").rstrip("/")
+    token = _read_env_value("UPSTASH_REDIS_REST_TOKEN")
+    if url and token:
+        return url, token
+    return None
+
+
+def _redis_cmd(*args: str | int):
+    cfg = _upstash_config()
+    if not cfg:
+        return None
+    url, token = cfg
+    resp = httpx.post(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        json=list(args),
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json().get("result")
+
+
 def _load_settings() -> dict[str, str]:
+    if _upstash_config():
+        try:
+            raw = _redis_cmd("GET", "enhi:group_settings")
+            if not raw:
+                return {}
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
     if not SETTINGS_PATH.exists():
         return {}
     try:
@@ -78,6 +112,9 @@ def _load_settings() -> dict[str, str]:
 
 
 def _save_settings(settings: dict[str, str]) -> None:
+    if _upstash_config():
+        _redis_cmd("SET", "enhi:group_settings", json.dumps(settings))
+        return
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
@@ -375,10 +412,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"Sorry, translation failed: {exc}")
 
 
-def main() -> None:
-    token = load_token()
-    logger.info("Loaded %d configured admin user ID(s)", len(ADMIN_IDS))
-    app = ApplicationBuilder().token(token).build()
+def build_application(token: str, *, webhook: bool = False) -> Application:
+    builder = ApplicationBuilder().token(token)
+    if webhook:
+        builder = builder.updater(None)
+    app = builder.build()
     app.add_handler(
         ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
     )
@@ -388,7 +426,13 @@ def main() -> None:
     app.add_handler(CommandHandler("mode", mode_command))
     app.add_handler(CallbackQueryHandler(mode_callback, pattern="^mode:(admins|all)$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    return app
 
+
+def main() -> None:
+    token = load_token()
+    logger.info("Loaded %d configured admin user ID(s)", len(ADMIN_IDS))
+    app = build_application(token, webhook=False)
     logger.info("English-to-Hindi bot is running (polling)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
